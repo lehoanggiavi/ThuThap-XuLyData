@@ -1,0 +1,118 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import OrdinalEncoder, RobustScaler
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+from sklearn.model_selection import train_test_split
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report
+from joblib import dump, load
+import statsmodels.api as sm
+
+# 1. Đọc dữ liệu
+df_heart = pd.read_csv('heart_disease.csv')
+df_heart = df_heart.drop(columns='id')
+
+# 2. Phân loại các cột
+numeric_col = ['age', 'trestbps', 'chol', 'thalch', 'oldpeak', 'ca', 'target']
+categories_col = [column for column in df_heart.columns if column not in numeric_col]
+
+# 3. Thay thế giá trị 0 bằng NaN
+for col in ['age', 'trestbps', 'chol', 'thalch']:
+    zero_count = df_heart[df_heart[col] == 0].shape[0]
+    df_heart[col] = df_heart[col].replace(0, np.nan)
+    print(f"Column: {col}, Dem_GT_0: {zero_count}")
+
+# 4. Mã hóa các cột phân loại
+ordinal_encoder = OrdinalEncoder()
+df_heart[categories_col] = ordinal_encoder.fit_transform(df_heart[categories_col])
+
+# 5. Loại bỏ outliers
+for col in ['chol']:
+    q1 = df_heart[col].quantile(0.25)
+    q3 = df_heart[col].quantile(0.75)
+    iqr = q3 - q1
+    lower_bound = q1 - 1.5 * iqr
+    upper_bound = q3 + 1.5 * iqr
+    df_heart = df_heart[(df_heart[col].isna()) | ((df_heart[col] >= lower_bound) & (df_heart[col] <= upper_bound))]
+
+# 6. Điền giá trị thiếu bằng MICE
+imputer = IterativeImputer(max_iter=20, random_state=0)
+df_heart = pd.DataFrame(imputer.fit_transform(df_heart), columns=df_heart.columns)
+df_heart = df_heart.round()
+df_heart['ca'] = df_heart['ca'].replace({-0: 0, -1: 0})
+
+# 7. Chia dữ liệu thành Train và Test
+X = df_heart.drop(columns=['target'])
+y = df_heart['target']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# 8. Chuẩn hóa dữ liệu trên tập Train
+scaler = RobustScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)  # Áp dụng trên tập Test
+
+# Lưu scaler
+dump(scaler, 'scaler.pkl')
+
+# 9. Áp dụng PCA trên tập Train
+pca = PCA()
+pca.fit(X_train_scaled)
+
+# Lựa chọn số thành phần chính
+explained_var = pca.explained_variance_ratio_
+cumsum_explained_var = np.cumsum(explained_var)
+n_components = np.argmax(cumsum_explained_var >= 0.9) + 1
+print(f'Số lượng thành phần chính được chọn: {n_components}')
+
+# Giảm chiều dữ liệu với số thành phần chính
+pca = PCA(n_components=n_components)
+X_pca_train_reduced = pca.fit_transform(X_train_scaled)
+X_pca_test_reduced = pca.transform(X_test_scaled)
+
+# Lưu PCA
+dump(pca, 'pca.pkl')
+
+# 10. Xây dựng mô hình Logistic Regression (Statsmodels)
+from statsmodels.api import Logit
+
+# Thêm hằng số cho mô hình
+X = sm.add_constant(X_pca_train_reduced)
+model = Logit(y_train, X).fit()
+print(model.summary())
+
+# Loại bỏ thành phần thứ 4 (index = 3)
+X_pca_train_reduced = np.delete(X_pca_train_reduced, 3, axis=1)
+X_pca_test_reduced = np.delete(X_pca_test_reduced, 3, axis=1)
+
+# Thêm hằng số cho mô hình sau khi loại bỏ thành phần
+X_1 = sm.add_constant(X_pca_train_reduced)
+
+# Xây dựng lại mô hình Logistic Regression
+model = Logit(y_train, X_1).fit()
+
+# Hiển thị tóm tắt kết quả
+print(model.summary())
+
+# 11. Huấn luyện Logistic Regression (Scikit-learn)
+model_sklearn = LogisticRegression()
+model_sklearn.fit(X_pca_train_reduced, y_train)
+
+# Intercept và Coefficients
+intercept = model_sklearn.intercept_
+coefficients = model_sklearn.coef_
+print(f'He so chan Intercept: {intercept}')
+print(f'He So Hoi Quy Ung Voi Tung Dac Trung Coefficients: {coefficients}')
+print('--================================--')
+
+# Lưu mô hình Logistic Regression
+dump(model_sklearn, 'LogisticRegression.pkl')
+
+# 12. Dự đoán trên tập Test
+y_pred = model_sklearn.predict(X_pca_test_reduced)
+
+# 13. Đánh giá mô hình
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("Classification Report:\n", classification_report(y_test, y_pred))
